@@ -6,13 +6,37 @@
   <title>Powiadomienia sesji</title>
   <style>
     :root { color-scheme: light dark; }
-    body{font:14px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin:16px}
+    body{font:14px system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:16px}
     h3{margin:0 0 12px}
-    button{padding:8px 12px; margin:0 8px 8px 0; cursor:pointer}
-    #log{margin-top:8px; color:#666; white-space:pre-wrap}
+    button{padding:8px 12px;margin:0 8px 8px 0;cursor:pointer}
+    #log{margin-top:8px;color:#666;white-space:pre-wrap}
     .row{margin:6px 0}
     .muted{opacity:.8}
-    code{background:#0001; padding:2px 6px; border-radius:6px}
+
+    /* Toasty (popup w rogu) */
+    #toasts{
+      position:fixed; right:16px; bottom:16px;
+      display:flex; flex-direction:column; gap:10px;
+      z-index:9999; pointer-events:none;
+    }
+    .toast{
+      pointer-events:auto;
+      background:color-mix(in oklab, Canvas 92%, black 12%);
+      color:CanvasText;
+      border-left:4px solid #ff4d4f;
+      border-radius:12px; padding:10px 12px; min-width:260px; max-width:420px;
+      box-shadow:0 10px 30px rgba(0,0,0,.25);
+      animation:toastIn .25s ease-out;
+      display:grid; grid-template-columns:1fr auto; align-items:start; gap:8px;
+    }
+    .toast .title{font-weight:600; margin:0 0 2px}
+    .toast .msg{margin:0; opacity:.9}
+    .toast .actions{grid-column:1/-1; display:flex; gap:8px; margin-top:6px}
+    .toast button{margin:0; padding:6px 10px; border-radius:8px}
+    .toast .open{background:#1677ff; color:#fff; border:none}
+    .toast .close{background:transparent; border:1px solid color-mix(in oklab, CanvasText 30%, transparent);
+                  color:CanvasText}
+    @keyframes toastIn{from{opacity:0; transform:translateY(8px)} to{opacity:1; transform:translateY(0)}}
   </style>
 </head>
 <body>
@@ -27,73 +51,100 @@
 
   <div id="log" class="row">Kliknij <b>Start</b> i zaakceptuj powiadomienia.</div>
 
+  <div id="toasts" aria-live="polite" aria-atomic="true"></div>
+
   <audio id="beep" preload="auto">
     <source src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg" type="audio/ogg">
   </audio>
 
   <script>
-  // === KONFIGURACJA – PODMIEŃ NA SWOJE LINKI ===
+  // === PODMIEŃ NA SWOJE LINKI ===
   const API_URL   = 'https://script.google.com/macros/s/AKfycbylIgysG9keESQTXBIMni3kH1eW2WUof8CRQE1lV6rNoXSUXaX3BYi1Z-s8Yq9ORdbXuw/exec';
   const SHEET_URL = 'https://docs.google.com/spreadsheets/d/1tzeUan4DH4Qd9ivqTYFbCUCNNVJpbVVFodzbocwxWc0/edit?gid=1312385262#gid=1312385262';
 
-  // === STAŁE ===
   const INTERVAL_MS = 5000;
-
-  // Anti-duplicaty po stronie frontu (gdyby ACK się spóźnił)
   const seen = new Set();
   let timer = null;
 
-  // ——— UTIL: log ———
+  // ——— LOG ———
   const log = (msg) => { document.getElementById('log').textContent = msg; };
 
-  // ——— UTIL: JSONP (bez CORS) ———
+  // ——— JSONP ———
   function jsonp(url, timeoutMs = 10000){
     return new Promise((resolve, reject) => {
       if (!url) return reject(new Error('Brak API_URL'));
       const cb = 'cb_' + Math.random().toString(36).slice(2);
       let done = false, s;
       const cleanup = () => { delete window[cb]; s && s.remove(); };
-      const to = setTimeout(() => {
-        if (done) return;
-        done = true; cleanup();
-        reject(new Error('JSONP timeout'));
-      }, timeoutMs);
-      window[cb] = (data) => {
-        if (done) return;
-        done = true; clearTimeout(to); cleanup();
-        resolve(data);
-      };
+      const to = setTimeout(() => { if (done) return; done = true; cleanup(); reject(new Error('JSONP timeout')); }, timeoutMs);
+      window[cb] = (data) => { if (done) return; done = true; clearTimeout(to); cleanup(); resolve(data); };
       s = document.createElement('script');
       s.src = url + (url.includes('?')?'&':'?') + 'callback=' + cb + '&_=' + Date.now();
-      s.onerror = () => {
-        if (done) return;
-        done = true; clearTimeout(to); cleanup();
-        reject(new Error('JSONP load error (sprawdź /exec i dostęp publiczny)'));
-      };
+      s.onerror = () => { if (done) return; done = true; clearTimeout(to); cleanup(); reject(new Error('JSONP load error (sprawdź /exec i dostęp publiczny)')); };
       document.head.appendChild(s);
     });
   }
 
   // ——— PERMISSIONS ———
   async function ensurePerm(){
-    if (!('Notification' in window)) { log('Brak wsparcia Web Notifications w tej przeglądarce.'); return false; }
+    if (!('Notification' in window)) { log('Brak wsparcia Web Notifications.'); return false; }
     if (Notification.permission === 'granted') return true;
     if (Notification.permission === 'denied') {
-      log('Powiadomienia są zablokowane dla tej strony. Włącz w kłódce przy adresie → Powiadomienia → Zezwalaj, a potem odśwież.');
+      log('Powiadomienia są zablokowane dla tej strony. Włącz w kłódce przy adresie → Powiadomienia → Zezwalaj i odśwież.');
       return false;
     }
-    const p = await Notification.requestPermission();
-    if (p !== 'granted') { log('Nie udzielono zgody (status: ' + p + ').'); return false; }
-    return true;
+    return (await Notification.requestPermission()) === 'granted';
   }
 
-  // ——— POWIADOMIENIE ———
+  // ——— ŚWIECENIE KARTY (migający tytuł) ———
+  const originalTitle = document.title;
+  let flashTimer = null;
+  function startTitleFlash(text='⏰ Koniec sesji'){
+    if (flashTimer) return;
+    let on = false;
+    flashTimer = setInterval(()=>{ document.title = on ? `⏰ ${text}` : originalTitle; on = !on; }, 800);
+  }
+  function stopTitleFlash(){
+    if (flashTimer) { clearInterval(flashTimer); flashTimer = null; }
+    document.title = originalTitle;
+  }
+  window.addEventListener('focus', stopTitleFlash);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') stopTitleFlash();
+  });
+
+  // ——— POPUP / TOAST ———
+  function showToast(title, msg){
+    const wrap = document.getElementById('toasts');
+    const el = document.createElement('div');
+    el.className = 'toast';
+    el.innerHTML = `
+      <div>
+        <div class="title">${title}</div>
+        <p class="msg">${msg}</p>
+      </div>
+      <button class="close" aria-label="Zamknij">✕</button>
+      <div class="actions">
+        ${SHEET_URL ? '<button class="open">Otwórz arkusz</button>' : ''}
+      </div>
+    `;
+    const remove = () => { el.remove(); if (!wrap.children.length) stopTitleFlash(); };
+    el.querySelector('.close').onclick = remove;
+    const openBtn = el.querySelector('.open');
+    if (openBtn) openBtn.onclick = () => { window.open(SHEET_URL, '_blank'); remove(); };
+
+    // automatyczne znikanie po 20 s (pauza na hover)
+    let hideTo = setTimeout(remove, 20000);
+    el.onmouseenter = () => { clearTimeout(hideTo); };
+    el.onmouseleave = () => { hideTo = setTimeout(remove, 12000); };
+
+    wrap.appendChild(el);
+  }
+
+  // ——— POWIADOMIENIE SYSTEMOWE ———
   function showNotif(title, body, tag){
     const n = new Notification(title, {
-      body,
-      tag,                // ten sam tag -> brak renotify
-      renotify: false,
-      requireInteraction: true
+      body, tag, renotify:false, requireInteraction:true
     });
     n.onclick = () => {
       window.focus();
@@ -102,20 +153,32 @@
     };
   }
 
-  // ——— POLL ———
+  // ——— GŁÓWNY POLL ———
   async function poll(){
     try{
       const rows = await jsonp(`${API_URL}?api=rows`);
       if (Array.isArray(rows) && rows.length){
         const fresh = rows.filter(r => !seen.has(r.row));
-        fresh.forEach(r => {
-          showNotif('Sesja zakończona', `${r.user} — ${r.endStr}`, `sesja-${r.row}`);
-          seen.add(r.row);
-        });
         if (fresh.length){
-          try { const b = document.getElementById('beep'); b.currentTime = 0; b.play(); } catch {}
+          // jeśli karta w tle – zacznij migać tytułem (pierwsza osoba + licznik)
+          const label = fresh.length > 1 ? `${fresh[0].user} (+${fresh.length-1})` : fresh[0].user;
+          if (document.hidden) startTitleFlash(`Koniec: ${label}`);
+
+          // powiadomienia + popup + dźwięk + ewentualna wibracja
+          fresh.forEach(r => {
+            showNotif('Sesja zakończona', `${r.user} — ${r.endStr}`, `sesja-${r.row}`);
+            showToast('⏰ Sesja zakończona', `${r.user} — ${r.endStr}`);
+            seen.add(r.row);
+          });
+          try{
+            const b=document.getElementById('beep'); b.currentTime=0; b.play();
+            if ('vibrate' in navigator) navigator.vibrate([200,100,200]); // na mobilkach
+          }catch{}
+
+          // ACK
           const ids = fresh.map(r => r.row).join(',');
           await jsonp(`${API_URL}?api=ack&rows=${encodeURIComponent(ids)}`);
+
           log(`Wysłano ${fresh.length} powiadomienie(a) o ${new Date().toLocaleTimeString()}`);
         }
       }
@@ -124,7 +187,7 @@
     }
   }
 
-  // ——— WPIĘCIE ZDARZEŃ ———
+  // ——— ZDARZENIA UI ———
   window.addEventListener('DOMContentLoaded', () => {
     const btnStart = document.getElementById('start');
     const btnStop  = document.getElementById('stop');
@@ -137,22 +200,21 @@
       timer = setInterval(poll, INTERVAL_MS);
       poll();
       log(`Monitorowanie aktywne (co ${INTERVAL_MS/1000} s).`);
-      btnStart.disabled = true;
-      btnStop.disabled  = false;
+      btnStart.disabled = true; btnStop.disabled = false;
     });
 
     btnStop.addEventListener('click', () => {
-      if (timer) clearInterval(timer);
-      timer = null;
+      if (timer) clearInterval(timer); timer = null;
       log('Zatrzymano.');
-      btnStart.disabled = false;
-      btnStop.disabled  = true;
+      btnStart.disabled = false; btnStop.disabled = true;
+      stopTitleFlash();
     });
 
     btnTest.addEventListener('click', async () => {
       if (await ensurePerm()) {
         showNotif('Test powiadomienia', new Date().toLocaleString(), 'manual-test');
-        try { const b = document.getElementById('beep'); b.currentTime = 0; b.play(); } catch {}
+        showToast('🔔 Test', 'To jest przykładowe powiadomienie.');
+        try { const b=document.getElementById('beep'); b.currentTime=0; b.play(); } catch {}
         log('Wysłano testową notyfikację.');
       }
     });
