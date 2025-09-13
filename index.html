@@ -18,16 +18,19 @@
 </audio>
 
 <script>
-const API_URL = 'https://script.google.com/macros/s/AKfycbylIgysG9keESQTXBIMni3kH1eW2WUof8CRQE1lV6rNoXSUXaX3BYi1Z-s8Yq9ORdbXuw/exec'; // <- PODMIEŃ
+const API_URL   = 'https://script.google.com/macros/s/AKfycbylIgysG9keESQTXBIMni3kH1eW2WUof8CRQE1lV6rNoXSUXaX3BYi1Z-s8Yq9ORdbXuw/exec';
+const SHEET_URL = 'https://docs.google.com/spreadsheets/d/1tzeUan4DH4Qd9ivqTYFbCUCNNVJpbVVFodzbocwxWc0/edit?gid=1312385262#gid=1312385262';
+
 let timer=null;
 
 function jsonp(url){
   return new Promise((resolve, reject) => {
     const cb = 'cb_' + Math.random().toString(36).slice(2);
-    window[cb] = (data) => { resolve(data); delete window[cb]; s.remove(); };
+    window[cb] = (data) => { resolve(data); cleanup(); };
     const s = document.createElement('script');
     s.src = url + (url.includes('?')?'&':'?') + 'callback=' + cb + '&_=' + Date.now();
-    s.onerror = (e)=>{ delete window[cb]; s.remove(); reject(e); };
+    s.onerror = () => { cleanup(); reject(new Error('JSONP load error')); };
+    function cleanup(){ delete window[cb]; s.remove(); }
     document.head.appendChild(s);
   });
 }
@@ -37,10 +40,17 @@ async function poll(){
     const rows = await jsonp(`${API_URL}?api=rows`);
     if (Array.isArray(rows) && rows.length){
       rows.forEach(r => {
-        new Notification('Sesja zakończona', {
+        const n = new Notification('Sesja zakończona', {
           body: `${r.user} — ${r.endStr}`,
-          tag: `sesja-${r.row}`, renotify: false
+          tag: `sesja-${r.row}`,        // brak dubli dla tego wiersza
+          renotify: false,
+          requireInteraction: true      // (opcjonalnie) zostaje na ekranie
         });
+        n.onclick = () => {
+          window.focus();
+          if (SHEET_URL) window.open(SHEET_URL, '_blank');
+          n.close();
+        };
       });
       try { const b=document.getElementById('beep'); b.currentTime=0; b.play(); } catch {}
       const ids = rows.map(r=>r.row).join(',');
@@ -58,7 +68,7 @@ async function ensurePerm(){
   return (await Notification.requestPermission()) === 'granted';
 }
 
-const log = (s)=> document.getElementById('log').textContent = s;
+const log = s => document.getElementById('log').textContent = s;
 
 start.onclick = async ()=>{
   if(!(await ensurePerm())) return log('Zezwól na powiadomienia.');
