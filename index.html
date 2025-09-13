@@ -19,71 +19,61 @@
 
 <script>
 const API_URL = 'https://script.google.com/macros/s/AKfycbylIgysG9keESQTXBIMni3kH1eW2WUof8CRQE1lV6rNoXSUXaX3BYi1Z-s8Yq9ORdbXuw/exec'; // <- PODMIEŃ
+let timer=null;
 
-let t = null;
-
-async function ensurePerm(){
-  if(!('Notification' in window)) { log('Brak wsparcia Web Notifications'); return false; }
-  if(Notification.permission === 'granted') return true;
-  const p = await Notification.requestPermission();
-  return p === 'granted';
-}
-
-async function fetchRows(){
-  const res = await fetch(`${API_URL}?api=rows`, { cache: 'no-store' });
-  if(!res.ok) throw new Error('HTTP '+res.status);
-  return res.json(); // [{row,user,endStr}]
-}
-
-function showNotifs(rows){
-  rows.forEach(r => {
-    new Notification('Sesja zakończona', {
-      body: `${r.user} — ${r.endStr}`,
-      tag: `sesja-${r.row}`, // brak dubli
-      renotify: false
-    });
+function jsonp(url){
+  return new Promise((resolve, reject) => {
+    const cb = 'cb_' + Math.random().toString(36).slice(2);
+    window[cb] = (data) => { resolve(data); delete window[cb]; s.remove(); };
+    const s = document.createElement('script');
+    s.src = url + (url.includes('?')?'&':'?') + 'callback=' + cb + '&_=' + Date.now();
+    s.onerror = (e)=>{ delete window[cb]; s.remove(); reject(e); };
+    document.head.appendChild(s);
   });
-  try { const b = document.getElementById('beep'); b.currentTime=0; b.play(); } catch {}
-}
-
-async function ack(rows){
-  // Ack po GET (bez preflightu): /exec?api=ack&rows=2,5,9
-  const ids = rows.map(r=>r.row).join(',');
-  if(!ids) return;
-  try { await fetch(`${API_URL}?api=ack&rows=${encodeURIComponent(ids)}`, { cache:'no-store' }); } catch {}
 }
 
 async function poll(){
   try{
-    const rows = await fetchRows();
-    if(Array.isArray(rows) && rows.length){
-      showNotifs(rows);
-      ack(rows);
+    const rows = await jsonp(`${API_URL}?api=rows`);
+    if (Array.isArray(rows) && rows.length){
+      rows.forEach(r => {
+        new Notification('Sesja zakończona', {
+          body: `${r.user} — ${r.endStr}`,
+          tag: `sesja-${r.row}`, renotify: false
+        });
+      });
+      try { const b=document.getElementById('beep'); b.currentTime=0; b.play(); } catch {}
+      const ids = rows.map(r=>r.row).join(',');
+      await jsonp(`${API_URL}?api=ack&rows=${encodeURIComponent(ids)}`);
       log(`Wysłano ${rows.length} powiadomień o ${new Date().toLocaleTimeString()}`);
     }
-  }catch(err){
-    log('Błąd: '+ (err && err.message || err));
+  } catch(err){
+    log('Błąd: ' + (err?.message || err));
   }
+}
+
+async function ensurePerm(){
+  if(!('Notification' in window)) { log('Brak wsparcia powiadomień'); return false; }
+  if(Notification.permission === 'granted') return true;
+  return (await Notification.requestPermission()) === 'granted';
 }
 
 const log = (s)=> document.getElementById('log').textContent = s;
 
-document.getElementById('start').onclick = async ()=>{
-  if(!(await ensurePerm())) return log('Brak zgody na powiadomienia. Zezwól w przeglądarce.');
-  if(t) clearInterval(t);
-  t = setInterval(poll, 5000);
+start.onclick = async ()=>{
+  if(!(await ensurePerm())) return log('Zezwól na powiadomienia.');
+  if (timer) clearInterval(timer);
+  timer = setInterval(poll, 5000);
   poll();
   log('Monitorowanie aktywne (co 5 s).');
   start.disabled = true; stop.disabled = false;
 };
-document.getElementById('stop').onclick = ()=>{
-  if(t) clearInterval(t); t=null;
+stop.onclick = ()=>{
+  if(timer) clearInterval(timer); timer=null;
   log('Zatrzymano.');
   start.disabled = false; stop.disabled = true;
 };
-document.getElementById('test').onclick = async ()=>{
-  if(await ensurePerm()){
-    new Notification('Test', { body: new Date().toLocaleString() });
-  }
+test.onclick = async ()=>{
+  if(await ensurePerm()) new Notification('Test', { body: new Date().toLocaleString() });
 };
 </script>
